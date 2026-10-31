@@ -69,11 +69,11 @@ pub struct Cli {
     pub claim_total_hours: f64,
 
     /// Plan mode: maximum hours per session (sessions above ~15h get rejected)
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(long, default_value_t = 3.0)]
     pub claim_session_max: f64,
 
     /// Plan mode: minutes between heartbeats inside a session
-    #[arg(long, default_value_t = 15.0)]
+    #[arg(long, default_value_t = 180.0)]
     pub claim_heartbeat_min: f64,
 
     /// Plan mode: how many days the claimed history spans
