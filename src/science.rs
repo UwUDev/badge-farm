@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MS_HOUR: f64 = 3_600_000.0;
 const RUN_HOURS: f64 = 250.0;
-const TARGET_HOURS_PER_DAY: f64 = 5.0;
+const TARGET_HOURS_PER_DAY: f64 = 10.0;
 const RUN_PAUSE_SECS: u64 = 90;
 
 fn now_ms() -> i64 {
@@ -198,13 +198,14 @@ fn schedule(
     session_max: f64,
     spread_days: usize,
     day_max: f64,
+    back_days: usize,
 ) -> Result<(Vec<Session>, usize), String> {
     let mut rng = rand::rng();
     let mut chunks: Vec<(usize, f64)> = Vec::new();
     for (game, total) in hours.iter().enumerate() {
         let mut left = *total;
         while left > 0.05 {
-            let take = left.min(rng.random_range(1.5..=session_max));
+            let take = left.min(session_max);
             chunks.push((game, take));
             left -= take;
         }
@@ -215,7 +216,7 @@ fn schedule(
 
     let mut queue = chunks.into_iter().peekable();
     let mut plan = Vec::new();
-    let mut day_end = now_ms();
+    let mut day_end = now_ms() - (back_days as i64) * 86_400_000;
     let mut days_used = 0usize;
 
     for _ in 0..spread_days {
@@ -270,14 +271,15 @@ fn schedule_auto(
     session_max: f64,
     spread_days: usize,
     day_max: f64,
+    back_days: usize,
 ) -> Result<(Vec<Session>, usize), String> {
     if spread_days > 0 {
-        return schedule(hours, session_max, spread_days, day_max);
+        return schedule(hours, session_max, spread_days, day_max, back_days);
     }
     let total: f64 = hours.iter().sum();
     let mut spread = ((total / TARGET_HOURS_PER_DAY).ceil() as usize).max(7);
     for _ in 0..16 {
-        if let Ok(plan) = schedule(hours, session_max, spread, day_max) {
+        if let Ok(plan) = schedule(hours, session_max, spread, day_max, back_days) {
             return Ok(plan);
         }
         spread = (spread as f64 * 1.4) as usize;
@@ -355,12 +357,15 @@ pub async fn claim_plan(
     let machine = crate::fingerprint::machine_guid();
     let user = rest.user_id.to_string();
     let mut left = total_hours;
+    let mut back_days = 0usize;
     let mut first_run = true;
     while left > 0.0 {
         let chunk = left.min(RUN_HOURS);
         let hours = library(games, chunk);
-        let (mut plan, days_used) = schedule_auto(&hours, session_max, spread_days, day_max)?;
+        let (mut plan, days_used) =
+            schedule_auto(&hours, session_max, spread_days, day_max, back_days)?;
         plan.sort_by_key(|s| s.start);
+        back_days += days_used.max(1);
 
         let mut events = Vec::new();
         for session in &plan {
@@ -379,12 +384,13 @@ pub async fn claim_plan(
         let planned: f64 = plan.iter().map(|s| s.duration as f64 / MS_HOUR).sum();
         let requests = events.len().div_ceil(batch.max(1));
         println!(
-            "[science] plan: {} games, {:.0}h, {} sessions, {:.1}h/day over {} days, {} events, {} requests",
+            "[science] plan: {} games, {:.0}h, {} sessions, {:.1}h/day over {} days ending {}d ago, {} events, {} requests",
             games,
             planned,
             plan.len(),
             planned / days_used.max(1) as f64,
             days_used,
+            back_days - days_used.max(1),
             events.len(),
             requests
         );
