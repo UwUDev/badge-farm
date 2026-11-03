@@ -8,7 +8,7 @@ pub struct Cli {
     #[arg(short, long, default_value = "token.txt")]
     pub token_file: String,
 
-    /// Number of random games to rotate through (0 = every detectable game)
+    /// Number of games: rotation count, or how many games to claim across with --hours
     #[arg(short, long, default_value_t = 0)]
     pub games: usize,
 
@@ -44,44 +44,48 @@ pub struct Cli {
     #[arg(long, requires = "stream_channel")]
     pub stream_guild: Option<u64>,
 
+    /// Hours of playtime to claim across games, then exit
+    #[arg(long, default_value_t = 0.0)]
+    pub hours: f64,
+
+    /// Print the science plan without posting
+    #[arg(long, visible_alias = "claim-dry-run")]
+    pub dry_run: bool,
+
     /// Claim playtime on N detectable games via the science endpoint, then exit
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, hide = true)]
     pub claim_games: usize,
 
     /// Hours to claim per game
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.0, hide = true)]
     pub claim_hours: f64,
 
     /// Events per science request
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 50, hide = true)]
     pub claim_batch: usize,
 
     /// Milliseconds to wait between science requests
-    #[arg(long, default_value_t = 1000)]
+    #[arg(long, default_value_t = 1000, hide = true)]
     pub claim_batch_delay_ms: u64,
 
-    /// Build the science payload and print it without posting
-    #[arg(long)]
-    pub claim_dry_run: bool,
-
     /// Plan mode: total hours to claim across a backdated history
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, hide = true)]
     pub claim_total_hours: f64,
 
     /// Plan mode: maximum hours per session (sessions above ~15h get rejected)
-    #[arg(long, default_value_t = 3.0)]
+    #[arg(long, default_value_t = 3.0, hide = true)]
     pub claim_session_max: f64,
 
     /// Plan mode: minutes between heartbeats inside a session
-    #[arg(long, default_value_t = 180.0)]
+    #[arg(long, default_value_t = 180.0, hide = true)]
     pub claim_heartbeat_min: f64,
 
-    /// Plan mode: how many days the claimed history spans
-    #[arg(long, default_value_t = 540)]
+    /// Plan mode: how many days the claimed history spans (0 = derived from the hours)
+    #[arg(long, default_value_t = 0, hide = true)]
     pub claim_spread_days: usize,
 
     /// Plan mode: maximum hours of play in a single day
-    #[arg(long, default_value_t = 14.0)]
+    #[arg(long, default_value_t = 14.0, hide = true)]
     pub claim_day_max_h: f64,
 }
 

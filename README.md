@@ -15,7 +15,7 @@ Ctrl+C stops it cleanly: the stream is closed, the voice channel is left and the
 ## Options
 
     -t, --token-file <file>        default token.txt
-    -g, --games <n>                number of games to rotate through, 0 = all (default 0)
+    -g, --games <n>                games to rotate through, or games to claim across with --hours
     -r, --rotate-minutes <min>     time spent on each game (default 10)
     -p, --poll-minutes <min>       how often badge progress is printed (default 5)
         --once                     stop after going through every game once
@@ -23,8 +23,18 @@ Ctrl+C stops it cleanly: the stream is closed, the voice channel is left and the
         --stream-guild <id>        guild of the channel, looked up automatically if omitted
         --no-games                 don't play anything, only stream
         --leave                    leave the voice channel and exit
+        --hours <hours>            claim that much playtime across games, then exit
+        --dry-run                  print the claim plan without posting
 
 Badge progress is also printed before every game switch.
+
+## Claiming playtime
+
+    cargo run --release -- --hours 5000 --games 100
+
+Claims that many hours of backdated play across that many detected games and exits. The run is split
+into 250 h chunks with a pause between them, three-hour sessions, one delta per session.
+`--dry-run` prints the plan for every chunk without posting.
 
 ## Streaming
 

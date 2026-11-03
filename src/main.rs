@@ -39,14 +39,21 @@ async fn main() {
         .await
         .expect("rest connect");
 
-    if cli.claim_total_hours > 0.0 {
+    let total = if cli.hours > 0.0 {
+        cli.hours
+    } else {
+        cli.claim_total_hours
+    };
+    if total > 0.0 {
         let games = if cli.claim_games > 0 {
             cli.claim_games
+        } else if cli.games > 0 {
+            cli.games
         } else {
-            115
+            100
         };
         let opts = science::PlanOptions {
-            total_hours: cli.claim_total_hours,
+            total_hours: total,
             games,
             session_max: cli.claim_session_max,
             hb_minutes: cli.claim_heartbeat_min,
@@ -54,7 +61,7 @@ async fn main() {
             day_max: cli.claim_day_max_h,
             batch: cli.claim_batch,
             delay_ms: cli.claim_batch_delay_ms,
-            dry_run: cli.claim_dry_run,
+            dry_run: cli.dry_run,
         };
         if let Err(e) = science::claim_plan(&rest, opts).await {
             eprintln!("[science] {e}");
@@ -71,7 +78,7 @@ async fn main() {
             cli.claim_heartbeat_min,
             cli.claim_batch,
             cli.claim_batch_delay_ms,
-            cli.claim_dry_run,
+            cli.dry_run,
         )
         .await
         {

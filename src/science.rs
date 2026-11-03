@@ -8,6 +8,9 @@ use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MS_HOUR: f64 = 3_600_000.0;
+const RUN_HOURS: f64 = 250.0;
+const TARGET_HOURS_PER_DAY: f64 = 5.0;
+const RUN_PAUSE_SECS: u64 = 90;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -262,6 +265,26 @@ fn schedule(
     Ok((plan, days_used))
 }
 
+fn schedule_auto(
+    hours: &[f64],
+    session_max: f64,
+    spread_days: usize,
+    day_max: f64,
+) -> Result<(Vec<Session>, usize), String> {
+    if spread_days > 0 {
+        return schedule(hours, session_max, spread_days, day_max);
+    }
+    let total: f64 = hours.iter().sum();
+    let mut spread = ((total / TARGET_HOURS_PER_DAY).ceil() as usize).max(7);
+    for _ in 0..16 {
+        if let Ok(plan) = schedule(hours, session_max, spread, day_max) {
+            return Ok(plan);
+        }
+        spread = (spread as f64 * 1.4) as usize;
+    }
+    Err("could not fit the claim into a backdated history".to_string())
+}
+
 async fn send(
     rest: &RestClient,
     analytics: &str,
@@ -328,59 +351,69 @@ pub async fn claim_plan(
     pool.shuffle(&mut rand::rng());
     pool.truncate(games);
 
-    let hours = library(games, total_hours);
-    let (mut plan, days_used) = schedule(&hours, session_max, spread_days, day_max)?;
-    plan.sort_by_key(|s| s.start);
-
     let mut ids = Ids::new(rest.locale(), rest.heartbeat_session_id(), rest.launch_signature());
     let machine = crate::fingerprint::machine_guid();
     let user = rest.user_id.to_string();
-    let mut events = Vec::new();
-    for session in &plan {
-        let (app, exe) = pool[session.game];
-        let id = app.id.to_string();
-        let fp = fingerprint::for_game(&id, exe, &machine, &user);
-        let game = Game {
-            id: &id,
-            name: &app.name,
-            exe,
-            fp: &fp,
-        };
-        events.extend(ids.session_events(game, session, hb_minutes));
-    }
+    let mut left = total_hours;
+    let mut first_run = true;
+    while left > 0.0 {
+        let chunk = left.min(RUN_HOURS);
+        let hours = library(games, chunk);
+        let (mut plan, days_used) = schedule_auto(&hours, session_max, spread_days, day_max)?;
+        plan.sort_by_key(|s| s.start);
 
-    let planned: f64 = plan.iter().map(|s| s.duration as f64 / MS_HOUR).sum();
-    let span_days = match (plan.first(), plan.last()) {
-        (Some(first), Some(last)) => {
-            (last.start + last.duration - first.start) as f64 / 86_400_000.0
+        let mut events = Vec::new();
+        for session in &plan {
+            let (app, exe) = pool[session.game];
+            let id = app.id.to_string();
+            let fp = fingerprint::for_game(&id, exe, &machine, &user);
+            let game = Game {
+                id: &id,
+                name: &app.name,
+                exe,
+                fp: &fp,
+            };
+            events.extend(ids.session_events(game, session, hb_minutes));
         }
-        _ => 0.0,
-    };
-    let requests = events.len().div_ceil(batch.max(1));
-    println!(
-        "[science] plan: {} games, {:.0}h, {} sessions, {:.1}h/day over {} days, {} events, {} requests",
-        games,
-        planned,
-        plan.len(),
-        planned / days_used.max(1) as f64,
-        days_used,
-        events.len(),
-        requests
-    );
-    println!("[science] history spans {span_days:.0} days (dry_run={dry_run})");
 
-    if dry_run {
-        let sample = events
-            .iter()
-            .find(|e| e["type"] == "launch_game")
-            .unwrap_or(&events[0]);
+        let planned: f64 = plan.iter().map(|s| s.duration as f64 / MS_HOUR).sum();
+        let requests = events.len().div_ceil(batch.max(1));
         println!(
-            "[science] sample event: {}",
-            serde_json::to_string_pretty(sample).unwrap_or_default()
+            "[science] plan: {} games, {:.0}h, {} sessions, {:.1}h/day over {} days, {} events, {} requests",
+            games,
+            planned,
+            plan.len(),
+            planned / days_used.max(1) as f64,
+            days_used,
+            events.len(),
+            requests
         );
-        return Ok(());
+        if events.is_empty() {
+            break;
+        }
+
+        if dry_run {
+            if first_run {
+                let sample = events
+                    .iter()
+                    .find(|e| e["type"] == "launch_game")
+                    .unwrap_or(&events[0]);
+                println!(
+                    "[science] sample event: {}",
+                    serde_json::to_string_pretty(sample).unwrap_or_default()
+                );
+                first_run = false;
+            }
+        } else {
+            send(rest, &analytics, events, batch, delay_ms).await?;
+        }
+
+        left -= chunk;
+        if left > 0.0 && !dry_run {
+            println!("[science] {left:.0}h left, pausing {RUN_PAUSE_SECS}s");
+            tokio::time::sleep(std::time::Duration::from_secs(RUN_PAUSE_SECS)).await;
+        }
     }
-    send(rest, &analytics, events, batch, delay_ms).await?;
     Ok(())
 }
 
