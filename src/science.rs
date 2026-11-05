@@ -2,15 +2,13 @@ use crate::fingerprint;
 use discord_client_rest::rest::{RequestProperties, RestClient};
 
 use discord_client_structs::structs::application::detectable::DetectableApplication;
-use rand::Rng;
 use rand::seq::SliceRandom;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MS_HOUR: f64 = 3_600_000.0;
 const RUN_HOURS: f64 = 250.0;
-const TARGET_HOURS_PER_DAY: f64 = 10.0;
-const RUN_PAUSE_SECS: u64 = 90;
+const RUN_PAUSE_SECS: u64 = 25;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -145,7 +143,7 @@ impl Ids {
         let step = ((hb_minutes * 60_000.0) as i64).max(1);
         let mut events = Vec::new();
         events.push(self.heartbeat(game, &session_id, session.start, 0, true, false));
-        events.push(self.launch(game, session.start));
+        events.push(self.launch(game, now_ms()));
         let mut tracked = 0i64;
         while tracked + step < session.duration {
             tracked += step;
@@ -193,14 +191,7 @@ fn library(games: usize, total_hours: f64) -> Vec<f64> {
         .collect()
 }
 
-fn schedule(
-    hours: &[f64],
-    session_max: f64,
-    spread_days: usize,
-    day_max: f64,
-    back_days: usize,
-) -> Result<(Vec<Session>, usize), String> {
-    let mut rng = rand::rng();
+fn schedule(hours: &[f64], session_max: f64) -> Vec<Session> {
     let mut chunks: Vec<(usize, f64)> = Vec::new();
     for (game, total) in hours.iter().enumerate() {
         let mut left = *total;
@@ -210,81 +201,18 @@ fn schedule(
             left -= take;
         }
     }
-    chunks.shuffle(&mut rng);
-    let active_days = (spread_days as f64 * 0.85).max(1.0);
-    let per_day = ((chunks.len() as f64 / active_days).ceil() as usize).max(1);
-
-    let mut queue = chunks.into_iter().peekable();
-    let mut plan = Vec::new();
-    let mut day_end = now_ms() - (back_days as i64) * 86_400_000;
-    let mut days_used = 0usize;
-
-    for _ in 0..spread_days {
-        if queue.peek().is_none() {
-            break;
-        }
-        days_used += 1;
-        if rng.random_bool(0.15) {
-            day_end -= 86_400_000;
-            continue;
-        }
-        let target = per_day + rng.random_range(0usize..=1);
-        let mut placed = 0usize;
-        let mut play = 0.0f64;
-        let mut window = 0.0f64;
-        let mut session_end = day_end - (rng.random_range(0.5..=4.0) * MS_HOUR) as i64;
-        while placed < target {
-            let Some(&(game, hours)) = queue.peek() else {
-                break;
-            };
-            let gap = rng.random_range(0.1..=0.5);
-            if play + hours > day_max || window + hours + gap > 21.0 {
-                break;
-            }
-            queue.next();
+    chunks
+        .into_iter()
+        .map(|(game, hours)| {
+            let end = now_ms();
             let duration = (hours * MS_HOUR) as i64;
-            let start = session_end - duration;
-            plan.push(Session {
+            Session {
                 game,
-                start,
+                start: end - duration,
                 duration,
-            });
-            placed += 1;
-            play += hours;
-            window += hours + gap;
-            session_end = start - (gap * MS_HOUR) as i64;
-        }
-        day_end -= 86_400_000;
-    }
-
-    if queue.peek().is_some() {
-        return Err(format!(
-            "{} sessions placed, games still queued - raise --claim-spread-days or --claim-day-max-h",
-            plan.len()
-        ));
-    }
-    Ok((plan, days_used))
-}
-
-fn schedule_auto(
-    hours: &[f64],
-    session_max: f64,
-    spread_days: usize,
-    day_max: f64,
-    back_days: usize,
-) -> Result<(Vec<Session>, usize), String> {
-    if spread_days > 0 {
-        return schedule(hours, session_max, spread_days, day_max, back_days);
-    }
-    let total: f64 = hours.iter().sum();
-    let mut spread = ((total / TARGET_HOURS_PER_DAY).ceil() as usize).max(7);
-    for _ in 0..16 {
-        if let Ok(plan) = schedule(hours, session_max, spread, day_max, back_days) {
-            return Ok(plan);
-        }
-        spread = (spread as f64 * 1.4) as usize;
-    }
-    Err("could not fit the claim into a backdated history".to_string())
+            }
+        })
+        .collect()
 }
 
 async fn send(
@@ -322,8 +250,6 @@ pub struct PlanOptions {
     pub games: usize,
     pub session_max: f64,
     pub hb_minutes: f64,
-    pub spread_days: usize,
-    pub day_max: f64,
     pub batch: usize,
     pub delay_ms: u64,
     pub dry_run: bool,
@@ -338,8 +264,6 @@ pub async fn claim_plan(
         games,
         session_max,
         hb_minutes,
-        spread_days,
-        day_max,
         batch,
         delay_ms,
         dry_run,
@@ -357,15 +281,11 @@ pub async fn claim_plan(
     let machine = crate::fingerprint::machine_guid();
     let user = rest.user_id.to_string();
     let mut left = total_hours;
-    let mut back_days = 0usize;
     let mut first_run = true;
     while left > 0.0 {
         let chunk = left.min(RUN_HOURS);
         let hours = library(games, chunk);
-        let (mut plan, days_used) =
-            schedule_auto(&hours, session_max, spread_days, day_max, back_days)?;
-        plan.sort_by_key(|s| s.start);
-        back_days += days_used.max(1);
+        let plan = schedule(&hours, session_max);
 
         let mut events = Vec::new();
         for session in &plan {
@@ -384,13 +304,10 @@ pub async fn claim_plan(
         let planned: f64 = plan.iter().map(|s| s.duration as f64 / MS_HOUR).sum();
         let requests = events.len().div_ceil(batch.max(1));
         println!(
-            "[science] plan: {} games, {:.0}h, {} sessions, {:.1}h/day over {} days ending {}d ago, {} events, {} requests",
+            "[science] plan: {} games, {:.0}h, {} sessions ending now, {} events, {} requests",
             games,
             planned,
             plan.len(),
-            planned / days_used.max(1) as f64,
-            days_used,
-            back_days - days_used.max(1),
             events.len(),
             requests
         );

@@ -32,7 +32,7 @@ Badge progress is also printed before every game switch.
 
     cargo run --release -- --hours 5000 --games 100
 
-Claims that many hours of backdated play across that many detected games and exits. The run is split
+Claims that many hours of play across that many detected games and exits. The run is split
 into 250 h chunks with a pause between them, three-hour sessions, one delta per session.
 `--dry-run` prints the plan for every chunk without posting.
 

@@ -57,8 +57,6 @@ async fn main() {
             games,
             session_max: cli.claim_session_max,
             hb_minutes: cli.claim_heartbeat_min,
-            spread_days: cli.claim_spread_days,
-            day_max: cli.claim_day_max_h,
             batch: cli.claim_batch,
             delay_ms: cli.claim_batch_delay_ms,
             dry_run: cli.dry_run,

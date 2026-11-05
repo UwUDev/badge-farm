@@ -79,14 +79,6 @@ pub struct Cli {
     /// Plan mode: minutes between heartbeats inside a session
     #[arg(long, default_value_t = 180.0, hide = true)]
     pub claim_heartbeat_min: f64,
-
-    /// Plan mode: how many days the claimed history spans (0 = derived from the hours)
-    #[arg(long, default_value_t = 0, hide = true)]
-    pub claim_spread_days: usize,
-
-    /// Plan mode: maximum hours of play in a single day
-    #[arg(long, default_value_t = 14.0, hide = true)]
-    pub claim_day_max_h: f64,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
