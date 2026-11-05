@@ -167,8 +167,7 @@ async fn main() {
     }
     let mut switch_at = Instant::now() + rotate;
 
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut terminate = Box::pin(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
@@ -218,8 +217,7 @@ async fn main() {
                 println!("[farm] playing {} ({})", game.name, game.id);
                 switch_at = Instant::now() + rotate;
             }
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
+            _ = &mut terminate => break,
         }
     }
 
