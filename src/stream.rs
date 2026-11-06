@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+const SUPPLEMENTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -25,6 +26,8 @@ pub struct StreamFarm {
     retry_at: Instant,
     stream_key: Option<String>,
     waiting_logged: bool,
+    ready_at: Option<Instant>,
+    supplemental_seen: bool,
 }
 
 impl StreamFarm {
@@ -33,13 +36,15 @@ impl StreamFarm {
             guild_id,
             channel_id,
             user_id,
-            voice_known: false,
+            voice_known: true,
             voice_channel: None,
             phase: Phase::Idle,
             since: Instant::now(),
             retry_at: Instant::now(),
             stream_key: None,
             waiting_logged: false,
+            ready_at: None,
+            supplemental_seen: false,
         }
     }
 
@@ -49,7 +54,6 @@ impl StreamFarm {
     }
 
     fn reset(&mut self) {
-        self.voice_known = false;
         self.voice_channel = None;
         self.stream_key = None;
         self.waiting_logged = false;
@@ -60,14 +64,26 @@ impl StreamFarm {
         key.ends_with(&format!(":{}", self.user_id))
     }
 
+    pub fn missing_supplemental(&self) -> bool {
+        self.ready_at
+            .is_some_and(|at| !self.supplemental_seen && at.elapsed() > SUPPLEMENTAL_TIMEOUT)
+    }
+
     pub fn on_event(&mut self, event: &Event) {
         match event {
-            Event::Ready(_) => self.reset(),
+            Event::Ready(_) => {
+                self.reset();
+                self.voice_known = true;
+                self.ready_at = Some(Instant::now());
+                self.supplemental_seen = false;
+            }
             Event::ReadySupplemental(supplemental) => {
                 self.voice_known = true;
+                self.supplemental_seen = true;
                 self.voice_channel = supplemental
                     .guilds
                     .iter()
+                    .filter(|g| self.guild_id.is_none_or(|id| g.id == id))
                     .filter_map(|g| g.voice_states.as_ref())
                     .flatten()
                     .find(|v| v.user_id == self.user_id)
@@ -75,16 +91,19 @@ impl StreamFarm {
             }
             Event::VoiceStateUpdate(update) if update.voice_state.user_id == self.user_id => {
                 let channel = update.voice_state.channel_id;
-                self.voice_channel = channel;
                 if channel == Some(self.channel_id) {
+                    self.voice_channel = channel;
                     if self.phase == Phase::Joining {
                         println!("[stream] joined voice channel {}", self.channel_id);
                         self.set_phase(Phase::Joined);
                     }
-                } else if self.phase != Phase::Idle && self.phase != Phase::Joining {
-                    println!("[stream] left the voice channel, restarting");
-                    self.stream_key = None;
-                    self.set_phase(Phase::Idle);
+                } else if channel.is_none() {
+                    self.voice_channel = None;
+                    if self.phase != Phase::Idle && self.phase != Phase::Joining {
+                        println!("[stream] left the voice channel, restarting");
+                        self.stream_key = None;
+                        self.set_phase(Phase::Idle);
+                    }
                 }
             }
             Event::StreamCreate(created) if self.owns_stream(&created.stream.stream_key) => {

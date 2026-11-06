@@ -1,127 +1,21 @@
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use discord_client_gateway::events::Event;
 use discord_client_gateway::gateway::GatewayClient;
-use discord_client_rest::rest::{RequestProperties, RestClient};
-use discord_client_structs::structs::application::detectable::DetectableApplication;
-use discord_client_structs::structs::channel::Channel;
-use discord_client_structs::structs::user::status::StatusType;
-use rand::seq::SliceRandom;
+use discord_client_rest::rest::RestClient;
 use std::time::Duration;
 
+mod cli;
+mod fingerprint;
+mod gateway;
+mod science;
 mod stream;
+mod utils;
+
+use crate::cli::Cli;
+use crate::gateway::{open_gateway, stream_only};
+use crate::utils::{pick_games, print_progress, resolve_guild};
 use stream::StreamFarm;
 use tokio::time::{Instant, interval, sleep, sleep_until};
-
-const GAME_TIME_BADGE: u64 = 20;
-const GAME_VARIETY_BADGE: u64 = 21;
-const STREAMING_BADGE: u64 = 19;
-
-#[derive(Clone, Copy, ValueEnum)]
-enum Status {
-    Online,
-    Idle,
-    Dnd,
-}
-
-impl From<Status> for StatusType {
-    fn from(status: Status) -> Self {
-        match status {
-            Status::Online => StatusType::Online,
-            Status::Idle => StatusType::AFK,
-            Status::Dnd => StatusType::DoNotDisturb,
-        }
-    }
-}
-
-#[derive(Parser)]
-#[command(about = "Farms Discord badge progress (Game Time, Game Variety, Streaming)")]
-struct Cli {
-    /// File containing the account token
-    #[arg(short, long, default_value = "token.txt")]
-    token_file: String,
-
-    /// Number of random games to rotate through (0 = every detectable game)
-    #[arg(short, long, default_value_t = 0)]
-    games: usize,
-
-    /// Minutes spent on each game before switching
-    #[arg(short, long, default_value_t = 10.0)]
-    rotate_minutes: f64,
-
-    /// Minutes between badge progress checks
-    #[arg(short, long, default_value_t = 5.0)]
-    poll_minutes: f64,
-
-    /// Stop after going through every game once
-    #[arg(long)]
-    once: bool,
-
-    /// Do not play games, only stream
-    #[arg(long, requires = "stream_channel")]
-    no_games: bool,
-
-    /// Voice channel to join and stream in
-    #[arg(short = 'c', long)]
-    stream_channel: Option<u64>,
-
-    /// Status shown while farming
-    #[arg(short, long, value_enum, default_value_t = Status::Idle)]
-    status: Status,
-
-    /// Leave any voice channel and exit
-    #[arg(long)]
-    leave: bool,
-
-    /// Guild of the voice channel (looked up from the channel when omitted)
-    #[arg(long, requires = "stream_channel")]
-    stream_guild: Option<u64>,
-}
-
-fn pick_games(all: Vec<DetectableApplication>, count: usize) -> Vec<DetectableApplication> {
-    let mut candidates: Vec<_> = all
-        .into_iter()
-        .filter(|g| {
-            g.executables
-                .iter()
-                .any(|e| e.os == "win32" && !e.is_launcher)
-        })
-        .collect();
-    candidates.shuffle(&mut rand::rng());
-    if count > 0 {
-        candidates.truncate(count);
-    }
-    candidates
-}
-
-async fn print_progress(rest: &RestClient) {
-    match rest.user().get_badges().await {
-        Ok(badges) => {
-            for badge in badges.badges.iter().filter(|b| {
-                [GAME_TIME_BADGE, GAME_VARIETY_BADGE, STREAMING_BADGE].contains(&b.badge_id)
-            }) {
-                let progress = badge
-                    .progress
-                    .as_ref()
-                    .and_then(|p| p.first())
-                    .map(|p| {
-                        format!(
-                            "{}/{} {} ({})",
-                            p.current,
-                            p.threshold,
-                            p.unit.as_deref().unwrap_or(""),
-                            p.progress_helper_text.as_deref().unwrap_or("")
-                        )
-                    })
-                    .unwrap_or_else(|| "no progress".to_string());
-                println!(
-                    "[badge] {} tier={:?} next={:?} {}",
-                    badge.name, badge.current_tier, badge.next_tier, progress
-                );
-            }
-        }
-        Err(e) => eprintln!("[badge] fetch failed: {e}"),
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -132,9 +26,87 @@ async fn main() {
         .trim()
         .to_string();
 
+    let ws = match open_gateway(&token).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("[check] gateway failed, nothing sent: {e}");
+            return;
+        }
+    };
+    println!("[check] gateway reached READY");
+
     let rest = RestClient::connect(token.clone(), None, None, None, None)
         .await
         .expect("rest connect");
+
+    let total = if cli.hours > 0.0 {
+        cli.hours
+    } else {
+        cli.claim_total_hours
+    };
+    let fingerprint = if total > 0.0 || cli.claim_games > 0 {
+        let machine = crate::fingerprint::machine_guid();
+        let user = rest.user_id.to_string();
+        match cli
+            .fingerprint_exe
+            .as_deref()
+            .and_then(|exe| crate::fingerprint::from_file(exe, &machine, &user))
+        {
+            Some(value) => value,
+            None => {
+                eprintln!(
+                    "[science] pass --fingerprint-exe <a real PE on this machine>: launch events need a genuine executable fingerprint"
+                );
+                ws.close().await;
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+    if total > 0.0 {
+        let games = if cli.claim_games > 0 {
+            cli.claim_games
+        } else if cli.games > 0 {
+            cli.games
+        } else {
+            100
+        };
+        let opts = science::PlanOptions {
+            total_hours: total,
+            games,
+            session_max: cli.claim_session_max,
+            hb_minutes: cli.claim_heartbeat_min,
+            batch: cli.claim_batch,
+            delay_ms: cli.claim_batch_delay_ms,
+            fingerprint,
+            dry_run: cli.dry_run,
+        };
+        if let Err(e) = science::claim_plan(&rest, opts).await {
+            eprintln!("[science] {e}");
+        }
+        ws.close().await;
+        return;
+    }
+
+    if cli.claim_games > 0 {
+        if let Err(e) = science::claim(
+            &rest,
+            cli.claim_games,
+            cli.claim_hours,
+            cli.claim_heartbeat_min,
+            cli.claim_batch,
+            cli.claim_batch_delay_ms,
+            &fingerprint,
+            cli.dry_run,
+        )
+        .await
+        {
+            eprintln!("[science] {e}");
+        }
+        ws.close().await;
+        return;
+    }
 
     let games = if cli.no_games {
         Vec::new()
@@ -152,21 +124,10 @@ async fn main() {
     };
 
     let mut leave_guild = None;
-    let mut stream = match cli.stream_channel {
+    let mut extras: Vec<(Option<u64>, u64)> = Vec::new();
+    let mut stream = match cli.stream_channel.first().copied() {
         Some(channel) => {
-            let guild = match cli.stream_guild {
-                Some(guild) => Some(guild),
-                None => {
-                    rest.get::<Channel>(
-                        &format!("channels/{channel}"),
-                        None,
-                        Some(RequestProperties::home()),
-                    )
-                    .await
-                    .expect("stream channel lookup")
-                    .guild_id
-                }
-            };
+            let guild = resolve_guild(&rest, cli.stream_guild, channel).await;
             println!("[stream] channel {channel} guild {guild:?}");
             leave_guild = guild;
             Some(StreamFarm::new(guild, channel, rest.user_id))
@@ -174,12 +135,32 @@ async fn main() {
         None => None,
     };
 
-    let mut gateway = GatewayClient::builder(token)
+    for &channel in cli.stream_channel.iter().skip(1) {
+        let guild = resolve_guild(&rest, cli.stream_guild, channel).await;
+        println!("[stream] extra channel {channel} guild {guild:?}");
+        extras.push((guild, channel));
+    }
+
+    let mut gateway = GatewayClient::builder(token.clone())
         .desktop()
         .connect()
         .await
         .expect("gateway connect");
     gateway.status = cli.status.into();
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let mut extra_tasks = Vec::new();
+    for (guild, channel) in extras {
+        let token = token.clone();
+        let status = cli.status;
+        let user_id = rest.user_id;
+        let game = games.first().map(|g| (g.name.clone(), g.id));
+        let stop_rx = stop_rx.clone();
+        extra_tasks.push(tokio::spawn(async move {
+            stream_only(token, status, guild, channel, user_id, game, stop_rx).await;
+        }));
+        sleep(Duration::from_millis(1200)).await;
+    }
 
     if cli.leave {
         gateway
@@ -208,8 +189,7 @@ async fn main() {
     }
     let mut switch_at = Instant::now() + rotate;
 
-    let mut terminate =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+    let mut terminate = Box::pin(tokio::signal::ctrl_c());
 
     loop {
         tokio::select! {
@@ -259,15 +239,19 @@ async fn main() {
                 println!("[farm] playing {} ({})", game.name, game.id);
                 switch_at = Instant::now() + rotate;
             }
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
+            _ = &mut terminate => break,
         }
     }
 
     if let Some(stream) = stream.as_mut() {
         stream.stop(&mut gateway).await;
     }
+    let _ = stop_tx.send(true);
+    for task in extra_tasks {
+        let _ = task.await;
+    }
     gateway.clear_game_activity().await.ok();
     print_progress(&rest).await;
     gateway.graceful_shutdown().await.ok();
+    ws.close().await;
 }
