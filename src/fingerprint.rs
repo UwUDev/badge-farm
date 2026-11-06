@@ -1,3 +1,5 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::Command;
@@ -11,16 +13,12 @@ fn sha(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn xor(mut out: Vec<u8>, user_id: &str) -> String {
     let key = sha(format!("{user_id}{CAREERS}").as_bytes());
     for i in 1..out.len() {
         out[i] ^= key[(i - 1) & 31];
     }
-    to_hex(&out)
+    STANDARD.encode(out)
 }
 
 fn payload(
@@ -100,6 +98,161 @@ pub fn machine_guid() -> String {
     value
 }
 
+#[cfg(windows)]
+fn signature(blob: &[u8]) -> Option<[u8; 32]> {
+    use windows_sys::Win32::Security::Cryptography::*;
+
+    #[repr(C)]
+    struct Blob {
+        cb_data: u32,
+        pb_data: *mut u8,
+    }
+
+    let mut data = Blob {
+        cb_data: blob.len() as u32,
+        pb_data: blob.as_ptr() as *mut u8,
+    };
+
+    unsafe {
+        let mut encoding = 0u32;
+        let mut content = 0u32;
+        let mut format = 0u32;
+        let mut store: HCERTSTORE = std::ptr::null_mut();
+        let mut msg: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut context: *mut core::ffi::c_void = std::ptr::null_mut();
+
+        let ok = CryptQueryObject(
+            CERT_QUERY_OBJECT_BLOB,
+            std::ptr::addr_of_mut!(data) as *const core::ffi::c_void,
+            CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED,
+            CERT_QUERY_FORMAT_FLAG_BINARY,
+            0,
+            &mut encoding,
+            &mut content,
+            &mut format,
+            &mut store,
+            &mut msg,
+            &mut context,
+        );
+        if ok == 0 {
+            return None;
+        }
+
+        let mut size = 0u32;
+        if CryptMsgGetParam(
+            msg,
+            CMSG_SIGNER_CERT_INFO_PARAM,
+            0,
+            std::ptr::null_mut(),
+            &mut size,
+        ) == 0
+            || size == 0
+        {
+            CryptMsgClose(msg);
+            CertCloseStore(store, 0);
+            return None;
+        }
+
+        let mut info = vec![0u8; size as usize];
+        if CryptMsgGetParam(
+            msg,
+            CMSG_SIGNER_CERT_INFO_PARAM,
+            0,
+            info.as_mut_ptr() as *mut core::ffi::c_void,
+            &mut size,
+        ) == 0
+        {
+            CryptMsgClose(msg);
+            CertCloseStore(store, 0);
+            return None;
+        }
+
+        let cert = CertFindCertificateInStore(
+            store,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_SUBJECT_CERT,
+            info.as_ptr() as *const core::ffi::c_void,
+            std::ptr::null(),
+        );
+        if cert.is_null() {
+            CryptMsgClose(msg);
+            CertCloseStore(store, 0);
+            return None;
+        }
+
+        let mut name = vec![0u16; 256];
+        let len = CertGetNameStringW(
+            cert,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0,
+            std::ptr::null(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        );
+        if len == 0 {
+            CertFreeCertificateContext(cert);
+            CryptMsgClose(msg);
+            CertCloseStore(store, 0);
+            return None;
+        }
+
+        let mut hash = [0u8; 32];
+        let mut hash_len = 32u32;
+        if CryptHashPublicKeyInfo(
+            0usize,
+            CALG_SHA_256,
+            0,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            std::ptr::addr_of!((*(*cert).pCertInfo).SubjectPublicKeyInfo),
+            hash.as_mut_ptr(),
+            &mut hash_len,
+        ) == 0
+            || hash_len != 32
+        {
+            CertFreeCertificateContext(cert);
+            CryptMsgClose(msg);
+            CertCloseStore(store, 0);
+            return None;
+        }
+
+        let subject = String::from_utf16_lossy(&name[..len as usize - 1]);
+        let mut hasher = Sha256::new();
+        hasher.update(subject.as_bytes());
+        hasher.update(hash);
+        let out: [u8; 32] = hasher.finalize().into();
+
+        CertFreeCertificateContext(cert);
+        CryptMsgClose(msg);
+        CertCloseStore(store, 0);
+        Some(out)
+    }
+}
+
+#[cfg(not(windows))]
+fn signature(_blob: &[u8]) -> Option<[u8; 32]> {
+    None
+}
+
+fn certificate_blob(data: &[u8], opt: usize) -> Option<&[u8]> {
+    let directories = u32::from_le_bytes(data[opt + 108..opt + 112].try_into().ok()?);
+    if directories < 5 {
+        return None;
+    }
+
+    let entry = opt + 112 + 4 * 8;
+    let offset = u32::from_le_bytes(data[entry..entry + 4].try_into().ok()?) as usize;
+    let size = u32::from_le_bytes(data[entry + 4..entry + 8].try_into().ok()?) as usize;
+    if size < 8 || offset.checked_add(size)? > data.len() {
+        return None;
+    }
+
+    let length = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+    let start = offset + 8;
+    let end = start.checked_add(length.checked_sub(8)?)?.min(data.len());
+    Some(&data[start..end])
+}
+
 pub fn from_file(path: &Path, machine_guid: &str, user_id: &str) -> Option<String> {
     let data = std::fs::read(path).ok()?;
     let file_size = data.len() as u64;
@@ -145,55 +298,19 @@ pub fn from_file(path: &Path, machine_guid: &str, user_id: &str) -> Option<Strin
     let header_hash = sha(&window[..table]);
     let section_hash = sha(&window[table..table_end]);
 
+    let cert = certificate_blob(&data, opt).and_then(signature);
+    let flags = 2 | u8::from(cert.is_some());
+
     let out = payload(
-        2,
+        flags,
         file_size,
         timestamp,
         size_of_image,
         header_hash,
         machine_user(machine_guid, user_id),
         section_hash,
-        [0u8; 32],
+        cert.unwrap_or([0u8; 32]),
     );
 
     Some(xor(out, user_id))
-}
-
-pub fn synthetic(game_id: &str, machine_guid: &str, user_id: &str) -> String {
-    let seed = sha(format!("exec:{game_id}:{machine_guid}:{user_id}").as_bytes());
-    let seed_hex = to_hex(&seed);
-
-    let a = u64::from_le_bytes(seed[0..8].try_into().unwrap());
-    let b = u32::from_le_bytes(seed[8..12].try_into().unwrap());
-    let c = u32::from_le_bytes(seed[12..16].try_into().unwrap());
-
-    let file_size = 4 * 1024 * 1024 + a % (120 * 1024 * 1024);
-    let timestamp = 1_451_606_400 + b % 283_000_000;
-    let size_of_image = ((file_size + 0x2000 + (c as u64 % 0x300000)) & !0xFFF) as u32;
-
-    let header = sha(format!("h:{seed_hex}").as_bytes());
-    let section = sha(format!("s:{seed_hex}").as_bytes());
-
-    let out = payload(
-        2,
-        file_size,
-        timestamp,
-        size_of_image,
-        header,
-        machine_user(machine_guid, user_id),
-        section,
-        [0u8; 32],
-    );
-
-    xor(out, user_id)
-}
-
-pub fn for_game(game_id: &str, executable: &str, machine_guid: &str, user_id: &str) -> String {
-    let path = Path::new(executable);
-    if path.is_absolute() {
-        if let Some(value) = from_file(path, machine_guid, user_id) {
-            return value;
-        }
-    }
-    synthetic(game_id, machine_guid, user_id)
 }

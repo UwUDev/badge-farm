@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 0.0)]
     pub hours: f64,
 
+    /// Executable to fingerprint for the launch events of a claim
+    #[arg(long)]
+    pub fingerprint_exe: Option<std::path::PathBuf>,
+
     /// Print the science plan without posting
     #[arg(long, visible_alias = "claim-dry-run")]
     pub dry_run: bool,

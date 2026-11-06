@@ -130,6 +130,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "badge-farm"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "discord_client_gateway",
  "discord_client_rest",
@@ -140,6 +141,7 @@ dependencies = [
  "sha2",
  "tokio",
  "uuid",
+ "windows-sys",
 ]
 
 [[package]]

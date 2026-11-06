@@ -1,4 +1,3 @@
-use crate::fingerprint;
 use discord_client_rest::rest::{RequestProperties, RestClient};
 
 use discord_client_structs::structs::application::detectable::DetectableApplication;
@@ -252,6 +251,7 @@ pub struct PlanOptions {
     pub hb_minutes: f64,
     pub batch: usize,
     pub delay_ms: u64,
+    pub fingerprint: String,
     pub dry_run: bool,
 }
 
@@ -266,6 +266,7 @@ pub async fn claim_plan(
         hb_minutes,
         batch,
         delay_ms,
+        fingerprint,
         dry_run,
     } = opts;
     let analytics = rest.science().analytics_token().await?;
@@ -278,8 +279,6 @@ pub async fn claim_plan(
     pool.truncate(games);
 
     let mut ids = Ids::new(rest.locale(), rest.heartbeat_session_id(), rest.launch_signature());
-    let machine = crate::fingerprint::machine_guid();
-    let user = rest.user_id.to_string();
     let mut left = total_hours;
     let mut first_run = true;
     while left > 0.0 {
@@ -291,12 +290,11 @@ pub async fn claim_plan(
         for session in &plan {
             let (app, exe) = pool[session.game];
             let id = app.id.to_string();
-            let fp = fingerprint::for_game(&id, exe, &machine, &user);
             let game = Game {
                 id: &id,
                 name: &app.name,
                 exe,
-                fp: &fp,
+                fp: &fingerprint,
             };
             events.extend(ids.session_events(game, session, hb_minutes));
         }
@@ -347,6 +345,7 @@ pub async fn claim(
     hb_minutes: f64,
     batch: usize,
     delay_ms: u64,
+    fingerprint: &str,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let analytics = rest.science().analytics_token().await?;
@@ -361,8 +360,6 @@ pub async fn claim(
     let duration = (hours * MS_HOUR) as i64;
     let start = now_ms() - duration;
     let mut ids = Ids::new(rest.locale(), rest.heartbeat_session_id(), rest.launch_signature());
-    let machine = crate::fingerprint::machine_guid();
-    let user = rest.user_id.to_string();
     let mut events = Vec::new();
     for (app, exe) in &picked {
         let session = Session {
@@ -371,12 +368,11 @@ pub async fn claim(
             duration,
         };
         let id = app.id.to_string();
-        let fp = fingerprint::for_game(&id, exe, &machine, &user);
         let game = Game {
             id: &id,
             name: &app.name,
             exe,
-            fp: &fp,
+            fp: fingerprint,
         };
         events.extend(ids.session_events(game, &session, hb_minutes));
     }

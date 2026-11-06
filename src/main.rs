@@ -44,6 +44,26 @@ async fn main() {
     } else {
         cli.claim_total_hours
     };
+    let fingerprint = if total > 0.0 || cli.claim_games > 0 {
+        let machine = crate::fingerprint::machine_guid();
+        let user = rest.user_id.to_string();
+        match cli
+            .fingerprint_exe
+            .as_deref()
+            .and_then(|exe| crate::fingerprint::from_file(exe, &machine, &user))
+        {
+            Some(value) => value,
+            None => {
+                eprintln!(
+                    "[science] pass --fingerprint-exe <a real PE on this machine>: launch events need a genuine executable fingerprint"
+                );
+                ws.close().await;
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
     if total > 0.0 {
         let games = if cli.claim_games > 0 {
             cli.claim_games
@@ -59,6 +79,7 @@ async fn main() {
             hb_minutes: cli.claim_heartbeat_min,
             batch: cli.claim_batch,
             delay_ms: cli.claim_batch_delay_ms,
+            fingerprint,
             dry_run: cli.dry_run,
         };
         if let Err(e) = science::claim_plan(&rest, opts).await {
@@ -76,6 +97,7 @@ async fn main() {
             cli.claim_heartbeat_min,
             cli.claim_batch,
             cli.claim_batch_delay_ms,
+            &fingerprint,
             cli.dry_run,
         )
         .await
